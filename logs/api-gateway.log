@@ -1,0 +1,2 @@
+🚀 API Gateway 启动成功，监听端口 :8080
+2026/05/11 21:32:12 API Gateway 启动失败: listen tcp :8080: bind: address already in use

@@ -96,9 +96,14 @@ func loadRSAPublicKey(path string) (*rsa.PublicKey, error) {
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
-	pub, err := x509.ParsePKCS1PublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse public key: %w", err)
+	// 尝试 PKIX 格式（-----BEGIN PUBLIC KEY-----）
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err == nil {
+		if key, ok := pub.(*rsa.PublicKey); ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("not an RSA public key")
 	}
-	return pub, nil
+	// 回退到 PKCS#1 格式（-----BEGIN RSA PUBLIC KEY-----）
+	return x509.ParsePKCS1PublicKey(block.Bytes)
 }

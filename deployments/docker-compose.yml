@@ -358,6 +358,70 @@ services:
     networks:
       - arhub-network
 
+  # 鉴权中心服务
+  auth-service:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: auth-service
+        SERVICE_PORT: 8088
+    image: arhub/auth-service:latest
+    container_name: arhub-auth-service
+    ports:
+      - "8088:8088"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # WebSocket 网关服务
+  ws-gateway:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: ws-gateway
+        SERVICE_PORT: 8087
+    image: arhub/ws-gateway:latest
+    container_name: arhub-ws-gateway
+    ports:
+      - "8087:8087"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
 # ============================================================
 # 数据卷定义（Docker 自动管理）
 # ============================================================
