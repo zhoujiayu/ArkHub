@@ -1,0 +1,37 @@
+{
+  "configs": {
+    "dev": {
+      "dataId": "arhub-dev",
+      "group": "DEFAULT_GROUP",
+      "content": {
+        "server": {
+          "port": 8080
+        },
+        "database": {
+          "host": "localhost",
+          "port": 5432,
+          "name": "arhub",
+          "user": "arhub",
+          "password": "arhub123"
+        },
+        "redis": {
+          "host": "localhost",
+          "port": 6379,
+          "db": 0
+        },
+        "rocketmq": {
+          "nameserver": "localhost:9876"
+        },
+        "market": {
+          "sources": [
+            {"name": "binance", "type": "rest", "url": "https://api.binance.com", "weight": 0.2},
+            {"name": "okx", "type": "websocket", "url": "wss://ws.okx.com:8443", "weight": 0.2},
+            {"name": "platform", "type": "internal", "weight": 0.6}
+          ],
+          "filterThreshold": 3.0,
+          "priceLimit": 0.05
+        }
+      }
+    }
+  }
+}

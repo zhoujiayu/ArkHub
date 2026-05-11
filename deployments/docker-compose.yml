@@ -1,0 +1,378 @@
+# ============================================================
+# ArkHub 基础设施 Docker Compose 配置
+# 说明：所有中间件均采用单机模式，便于本地开发和学习
+# 生产环境请根据实际情况调整为集群模式
+# ============================================================
+
+services:
+  # PostgreSQL - 关系型数据库（单机模式）
+  # 用途：存储订单、交易、用户资产、NFT、回购等业务数据
+  # 单机模式说明：生产环境使用主从复制或流复制集群，本地开发单节点即可满足需求
+  postgres:
+    image: postgres:15-alpine                    # 使用 Alpine 版本，镜像体积小
+    container_name: arhub-postgres               # 容器命名，便于管理
+    environment:
+      POSTGRES_USER: arhub                        # 数据库用户名
+      POSTGRES_PASSWORD: arhub123                # 数据库密码（生产环境请使用强密码）
+      POSTGRES_DB: arhub                         # 默认数据库名
+    ports:
+      - "5432:5432"                             # 映射本地 5432 端口到容器
+    volumes:
+      - postgres-data:/var/lib/postgresql/data   # 数据持久化卷
+      - ../migrations:/docker-entrypoint-initdb.d  # 挂载初始化脚本，首次启动自动执行
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arhub -d arhub"]  # 健康检查：PostgreSQL 是否就绪
+      interval: 10s                              # 每 10 秒检查一次
+      timeout: 5s                                # 每次检查超时 5 秒
+      retries: 5                                 # 失败 5 次后标记为不健康
+    networks:
+      - arhub-network                            # 使用自定义网络，与其他服务通信
+
+  # Redis - 内存缓存数据库（单机模式）
+  # 用途：订单簿缓存、用户会话、行情价格、NFT 热度等
+  # 单机模式说明：生产环境使用 Redis Cluster，本地开发单节点即可满足需求
+  redis:
+    image: redis:7-alpine                          # 使用 Alpine 版本
+    container_name: arhub-redis                   # 容器命名
+    ports:
+      - "6379:6379"                             # 映射本地 6379 端口
+    volumes:
+      - redis-data:/data                          # 数据持久化卷
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # 参数说明：
+    #   --appendonly yes            开启 AOF 持久化，防止数据丢失
+    #   --maxmemory 256mb           限制最大内存为 256MB
+    #   --maxmemory-policy allkeys-lru  内存不足时按 LRU 策略淘汰键
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]         # 健康检查：ping 返回 PONG 即正常
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - arhub-network
+
+  # RocketMQ - 消息队列（单机模式）
+  # 用途：价格推送、成交通知、链上事件异步处理等
+  # 单机模式说明：生产环境使用 NameServer + Broker 集群，本地单节点即可
+  rocketmq:
+    image: apache/rocketmq:5.1.4                 # RocketMQ 官方镜像
+    platform: linux/amd64                         # 指定平台（兼容 Apple Silicon）
+    container_name: arhub-rocketmq               # 容器命名
+    ports:
+      - "9876:9876"                             # NameServer 端口
+      - "10911:10911"                           # Broker 端口
+    volumes:
+      - rocketmq-data:/home/rocketmq/store       # 数据持久化卷
+    environment:
+      - JAVA_OPT_EXT=-server -Xms256m -Xmx256m -Xmn128m  # JVM 参数，限制内存使用
+    command: >
+      sh -c "
+        cd /home/rocketmq/rocketmq-5.1.4/bin &&
+        nohup sh mqnamesrv > /dev/null 2>&1 &    # 后台启动 NameServer
+        sleep 5 &&                                 # 等待 NameServer 启动
+        nohup sh mqbroker -n localhost:9876 > /dev/null 2>&1 &  # 后台启动 Broker
+        sleep infinity                             # 保持容器运行
+      "
+    networks:
+      - arhub-network
+
+  # Nacos - 配置中心与服务注册（单机模式）
+  # 用途：行情权重、价格限幅等配置热更新；服务注册与发现
+  # 单机模式说明：生产环境使用 MySQL + 多节点集群，本地使用 Derby 内嵌数据库
+  nacos:
+    image: nacos/nacos-server:v2.2.3             # Nacos 官方镜像
+    platform: linux/amd64                         # 指定平台（兼容 Apple Silicon）
+    container_name: arhub-nacos                   # 容器命名
+    environment:
+      - MODE=standalone                           # 单机模式
+      - SPRING_DATASOURCE_PLATFORM=               # 使用 Derby 内嵌数据库
+      - MYSQL_SERVICE_HOST=                       # 不使用 MySQL
+    ports:
+      - "8848:8848"                             # HTTP 端口
+      - "9848:9848"                             # gRPC 端口
+    volumes:
+      - nacos-data:/home/nacos/data              # 数据持久化卷
+    networks:
+      - arhub-network
+
+  # Prometheus - 监控数据采集
+  # 用途：采集系统指标（CPU、内存）和业务指标（订单量、撮合延迟等）
+  prometheus:
+    image: prom/prometheus:v2.54.0              # Prometheus 官方镜像
+    platform: linux/amd64                         # 指定平台（兼容 Apple Silicon）
+    container_name: arhub-prometheus             # 容器命名
+    ports:
+      - "9090:9090"                             # Web UI 端口
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro  # 挂载配置文件
+      - prometheus-data:/prometheus               # 数据持久化卷
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'    # 指定配置文件路径
+      - '--storage.tsdb.path=/prometheus'                  # 数据存储路径
+      - '--web.enable-lifecycle'                           # 启用生命周期 API
+    networks:
+      - arhub-network
+
+  # Grafana - 监控仪表盘
+  # 用途：可视化展示 Prometheus 采集的指标数据
+  grafana:
+    image: grafana/grafana:10.2.0                 # Grafana 官方镜像
+    platform: linux/amd64                         # 指定平台（兼容 Apple Silicon）
+    container_name: arhub-grafana                  # 容器命名
+    ports:
+      - "3000:3000"                             # Web UI 端口
+    volumes:
+      - grafana-data:/var/lib/grafana             # 数据持久化卷（仪表盘配置）
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin           # 管理员密码（生产环境请修改）
+    networks:
+      - arhub-network
+
+  # ============================================================
+  # Go 服务层（从 Dockerfile 构建）
+  # 说明：以下服务从项目根目录的 Dockerfile 构建
+  # 每个服务独立构建，通过 build args 传入服务名和端口
+  # ============================================================
+
+  # API 网关服务
+  api-gateway:
+    build:
+      context: ../                  # 构建上下文：项目根目录
+      dockerfile: Dockerfile         # 使用项目根目录的 Dockerfile
+      args:                          # 构建参数
+        SERVICE_NAME: api-gateway   # 要编译的服务名
+        SERVICE_PORT: 8080           # 服务监听端口
+    image: arhub/api-gateway:latest  # 镜像标签
+    container_name: arhub-api-gateway
+    ports:
+      - "8080:8080"                 # 映射本地 8080 到容器 8080
+    environment:                     # 环境变量
+      - DB_HOST=postgres             # 数据库地址（容器名，Docker DNS 解析）
+      - DB_PORT=5432                 # 数据库端口
+      - DB_USER=arhub                # 数据库用户名
+      - DB_PASSWORD=arhub123         # 数据库密码
+      - DB_NAME=arhub                # 数据库名
+      - REDIS_HOST=redis             # Redis 地址
+      - REDIS_PORT=6379              # Redis 端口
+      - NACOS_HOST=nacos             # Nacos 地址
+      - NACOS_PORT=8848             # Nacos 端口
+      - ROCKETMQ_HOST=rocketmq       # RocketMQ 地址
+      - ROCKETMQ_PORT=9876          # RocketMQ 端口
+    depends_on:                        # 依赖的中间件服务
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # 订单撮合引擎
+  matching-engine:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: matching-engine
+        SERVICE_PORT: 8081
+    image: arhub/matching-engine:latest
+    container_name: arhub-matching-engine
+    ports:
+      - "8081:8081"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # 行情聚合服务
+  market-data:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: market-data
+        SERVICE_PORT: 8082
+    image: arhub/market-data:latest
+    container_name: arhub-market-data
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # 链上链下一致性服务
+  chain-sync:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: chain-sync
+        SERVICE_PORT: 8083
+    image: arhub/chain-sync:latest
+    container_name: arhub-chain-sync
+    ports:
+      - "8083:8083"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # NFT 业务服务
+  nft-service:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: nft-service
+        SERVICE_PORT: 8084
+    image: arhub/nft-service:latest
+    container_name: arhub-nft-service
+    ports:
+      - "8084:8084"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # 回购统计服务
+  buyback-service:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: buyback-service
+        SERVICE_PORT: 8085
+    image: arhub/buyback-service:latest
+    container_name: arhub-buyback-service
+    ports:
+      - "8085:8085"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+  # 风控服务
+  risk-service:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: risk-service
+        SERVICE_PORT: 8086
+    image: arhub/risk-service:latest
+    container_name: arhub-risk-service
+    ports:
+      - "8086:8086"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=arhub
+      - DB_PASSWORD=arhub123
+      - DB_NAME=arhub
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NACOS_HOST=nacos
+      - NACOS_PORT=8848
+      - ROCKETMQ_HOST=rocketmq
+      - ROCKETMQ_PORT=9876
+    depends_on:
+      - postgres
+      - redis
+      - nacos
+      - rocketmq
+    networks:
+      - arhub-network
+
+# ============================================================
+# 数据卷定义（Docker 自动管理）
+# ============================================================
+volumes:
+  postgres-data:                                  # PostgreSQL 数据持久化
+  redis-data:                                     # Redis 数据持久化
+  rocketmq-data:                                  # RocketMQ 数据持久化
+  nacos-data:                                     # Nacos 数据持久化
+  prometheus-data:                                # Prometheus 数据持久化
+  grafana-data:                                   # Grafana 数据持久化
+
+# ============================================================
+# 网络定义（自定义桥接网络）
+# 说明：所有服务在同一网络内，可通过服务名互相访问
+# ============================================================
+networks:
+  arhub-network:
+    driver: bridge                                 # 桥接模式，容器间可通信
