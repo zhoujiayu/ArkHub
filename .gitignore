@@ -1,0 +1,26 @@
+# Binaries
+api-gateway
+auth-service
+ws-gateway
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Keys (should be generated at deploy time)
+configs/private.pem
+configs/public.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/

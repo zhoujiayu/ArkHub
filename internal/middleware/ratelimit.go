@@ -1,95 +1,147 @@
 // ============================================================
 // internal/middleware/ratelimit.go
-// 限流中间件
-// 职责：控制单位时间内的请求数量，防止系统被流量冲垮
-// 算法：令牌桶（Token Bucket）
+// 限流熔断中间件
+// 职责：基于 Sentinel-Go 实现 IP 限流、用户限流、接口限流和熔断
 // ============================================================
 
 package middleware
 
 import (
+	"errors"
 	"net/http"
-	"time"
+
+	"github.com/gin-gonic/gin"
+
+	sentinel "github.com/alibaba/sentinel-golang/api"
+	"github.com/alibaba/sentinel-golang/core/base"
+	"github.com/alibaba/sentinel-golang/core/circuitbreaker"
+	"github.com/alibaba/sentinel-golang/core/flow"
+
+	"arhub/internal/response"
 )
 
-// RateLimiter 定义限流器接口
-// 不同限流策略（固定窗口、滑动窗口、令牌桶）实现此接口
-type RateLimiter interface {
-	// Allow 判断是否允许请求通过
-	// 参数：
-	//   key - 限流的标识（如 IP 地址、用户ID）
-	// 返回：
-	//   bool - true 允许通过，false 拒绝
-	Allow(key string) bool
+// InitSentinel 初始化 Sentinel 规则
+func InitSentinel() error {
+	// 初始化 Sentinel
+	err := sentinel.InitDefault()
+	if err != nil {
+		return err
+	}
+
+	// IP 限流：60 次/分钟
+	_, err = flow.LoadRules([]*flow.Rule{
+		{
+			Resource:               "ip_limit",
+			Threshold:              60,
+			TokenCalculateStrategy: flow.Direct,
+			ControlBehavior:        flow.Reject,
+			StatIntervalInMs:       60000,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// 用户限流：100 次/分钟
+	_, err = flow.LoadRules([]*flow.Rule{
+		{
+			Resource:               "user_limit",
+			Threshold:              100,
+			TokenCalculateStrategy: flow.Direct,
+			ControlBehavior:        flow.Reject,
+			StatIntervalInMs:       60000,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// 接口限流：1000 QPS
+	_, err = flow.LoadRules([]*flow.Rule{
+		{
+			Resource:               "api_limit",
+			Threshold:              1000,
+			TokenCalculateStrategy: flow.Direct,
+			ControlBehavior:        flow.Reject,
+			StatIntervalInMs:       1000,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// 熔断：错误率 > 50% 持续 30 秒
+	_, err = circuitbreaker.LoadRules([]*circuitbreaker.Rule{
+		{
+			Resource:         "api_circuit_breaker",
+			Strategy:         circuitbreaker.ErrorRatio,
+			Threshold:        0.5,
+			RetryTimeoutMs:   30000,
+			StatIntervalMs:   30000,
+			MinRequestAmount: 10,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-// TokenBucket 实现令牌桶限流算法
-// 原理：
-//   1. 系统以固定速率向桶中放入令牌
-//   2. 每个请求需要消耗一个令牌
-//   3. 桶满后不再放入令牌，桶空后请求被拒绝
-// 优点：允许突发流量，同时限制平均速率
-type TokenBucket struct {
-	capacity   int           // 桶的容量（最多可容纳的令牌数）
-	tokens     int           // 当前桶中的令牌数
-	refillRate time.Duration // 令牌补充间隔（如每 100ms 补充一个）
-	lastRefill time.Time     // 上次补充令牌的时间
-}
+// RateLimitMiddleware 返回限流中间件
+func RateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// IP 限流
+		ip := c.ClientIP()
+		if e, b := sentinel.Entry("ip_limit", sentinel.WithArgs(ip)); b != nil {
+			response.Error(c, http.StatusTooManyRequests, response.CodeRateLimited, "请求过于频繁，请稍后再试")
+			c.Abort()
+			return
+		} else {
+			defer e.Exit()
+		}
 
-// NewTokenBucket 创建令牌桶限流器
-// 参数：
-//   capacity   - 桶容量（如 100）
-//   refillRate - 补充速率（如 100ms 补充一个）
-// 返回：
-//   *TokenBucket - 限流器实例
-func NewTokenBucket(capacity int, refillRate time.Duration) *TokenBucket {
-	return &TokenBucket{
-		capacity:   capacity,
-		tokens:     capacity, // 初始时桶是满的
-		refillRate: refillRate,
-		lastRefill: time.Now(),
+		// 用户限流
+		userID := c.GetString("user_id")
+		if userID != "" {
+			if e, b := sentinel.Entry("user_limit", sentinel.WithArgs(userID)); b != nil {
+				response.Error(c, http.StatusTooManyRequests, response.CodeRateLimited, "请求过于频繁，请稍后再试")
+				c.Abort()
+				return
+			} else {
+				defer e.Exit()
+			}
+		}
+
+		// 接口限流
+		if e, b := sentinel.Entry("api_limit", sentinel.WithArgs(c.Request.URL.Path)); b != nil {
+			response.Error(c, http.StatusTooManyRequests, response.CodeRateLimited, "请求过于频繁，请稍后再试")
+			c.Abort()
+			return
+		} else {
+			defer e.Exit()
+		}
+
+		c.Next()
 	}
 }
 
-// Allow 判断是否允许请求通过
-// 实现逻辑：
-//   1. 计算距离上次补充的时间，补充相应数量的令牌
-//   2. 如果桶中有令牌，消耗一个并返回 true
-//   3. 如果桶中没有令牌，返回 false
-func (tb *TokenBucket) Allow(key string) bool {
-	// TODO: 实现线程安全的令牌桶逻辑
-	// 当前为骨架，实际开发需使用 sync.Mutex 保证并发安全
-	return true
-}
+// CircuitBreakerMiddleware 返回熔断中间件
+func CircuitBreakerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		e, b := sentinel.Entry("api_circuit_breaker", sentinel.WithTrafficType(base.Inbound))
+		if b != nil {
+			response.Error(c, http.StatusServiceUnavailable, response.CodeServiceUnavailable, "服务暂不可用，请稍后再试")
+			c.Abort()
+			return
+		}
+		defer e.Exit()
 
-// RateLimitMiddleware 返回一个 HTTP 限流中间件
-// 使用方式：
-//   rateLimiter := NewTokenBucket(100, 100*time.Millisecond)
-//   http.Handle("/api/", RateLimitMiddleware(rateLimiter)(handler))
-//
-// 参数：
-//   limiter - 限流器实例
-// 返回：
-//   func(http.Handler) http.Handler - 包装后的中间件
-func RateLimitMiddleware(limiter RateLimiter) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 获取限流标识（优先使用用户ID， fallback 到 IP 地址）
-			key := r.Header.Get("X-User-ID")
-			if key == "" {
-				key = r.RemoteAddr // 如果没有用户ID，使用 IP 地址
-			}
+		c.Next()
 
-			// 检查是否允许通过
-			if !limiter.Allow(key) {
-				// 请求被限流，返回 429 Too Many Requests
-				w.WriteHeader(http.StatusTooManyRequests)
-				w.Write([]byte("请求过于频繁，请稍后再试"))
-				return
-			}
-
-			// 请求通过，继续处理
-			next.ServeHTTP(w, r)
-		})
+		// 根据响应状态码记录错误
+		if c.Writer.Status() >= 500 {
+				sentinel.TraceError(e, errors.New("server error"))
+		}
 	}
 }

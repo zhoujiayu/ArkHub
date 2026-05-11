@@ -9,16 +9,21 @@
 # 阶段1：构建阶段（Builder）
 # 使用 Go 官方镜像，包含完整的编译工具链
 # ============================================================
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # 设置构建环境变量
-ENV GO111MODULE=on    # 启用 Go Modules
-ENV CGO_ENABLED=0   # 禁用 CGO，生成静态链接的可执行文件（Alpine 无 glibc）
-ENV GOOS=linux        # 目标操作系统
-ENV GOARCH=amd64      # 目标架构
-
-# 安装编译依赖（Git、Make 等）
-RUN apk add --no-cache git make
+# GO111MODULE=on      启用 Go Modules
+# CGO_ENABLED=0       禁用 CGO，生成静态链接的可执行文件（Alpine 无 glibc）
+# GOOS=linux          目标操作系统
+# GOARCH=amd64        目标架构
+# GOPROXY             使用国内 Go 代理，解决容器内下载依赖超时问题
+# GOTOOLCHAIN=auto    自动下载所需 Go 版本（解决依赖要求 Go 1.25 的问题）
+ENV GO111MODULE=on
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOARCH=amd64
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOTOOLCHAIN=auto
 
 # 设置工作目录
 WORKDIR /build
@@ -44,9 +49,6 @@ RUN go build -ldflags="-s -w" -o bin/${SERVICE_NAME} ./cmd/${SERVICE_NAME}
 # 使用最小化的 Alpine 镜像，仅包含运行所需的依赖
 # ============================================================
 FROM alpine:latest
-
-# 安装 ca-certificates（HTTPS 请求需要）和 tzdata（时区支持）
-RUN apk --no-cache add ca-certificates tzdata
 
 # 设置工作目录
 WORKDIR /app
