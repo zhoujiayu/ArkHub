@@ -207,6 +207,8 @@ make test
 ArkHub/
 ├── cmd/                          # 各阶段可执行入口（每个子目录为一个独立服务）
 │   ├── api-gateway/              # Phase 2：API 网关服务
+│   ├── auth-service/             # Phase 2：鉴权中心服务
+│   ├── ws-gateway/               # Phase 2：WebSocket 网关服务
 │   ├── matching-engine/          # Phase 4：订单撮合引擎
 │   ├── market-data/              # Phase 3：行情聚合服务
 │   ├── chain-sync/               # Phase 5：链上链下一致性服务
@@ -214,8 +216,13 @@ ArkHub/
 │   ├── buyback-service/          # Phase 7：回购统计服务
 │   └── risk-service/             # Phase 8：风控服务
 ├── internal/                     # 私有代码（不对外暴露）
-│   ├── pkg/                      # 公共包（数据库、Redis、MQ 客户端封装）
-│   └── middleware/               # 限流、熔断等中间件
+│   ├── pkg/                      # 公共包（数据库、Redis、MQ 客户端封装、JWT）
+│   │   ├── db/                   # PostgreSQL 客户端封装
+│   │   ├── redis/                # Redis 缓存客户端封装
+│   │   ├── mq/                   # RocketMQ 消息队列客户端封装
+│   │   └── jwt/                  # JWT 工具包（RS256 非对称加密）
+│   ├── middleware/               # 限流、熔断、鉴权等中间件
+│   └── response/                 # 统一响应格式（Phase 2）
 ├── pkg/                          # 公共代码库（可独立使用）
 │   └── utils/                    # 工具函数（日期、字符串、加密等）
 ├── api/                          # API 定义（OpenAPI / Proto）
@@ -301,7 +308,8 @@ ArkHub/
 | **API Gateway** | http://localhost:8080 | http://api-gateway:8080 | 8080 |
 | **撮合引擎** | http://localhost:8081 | http://matching-engine:8081 | 8081 |
 | **行情聚合** | http://localhost:8082 | http://market-data:8082 | 8082 |
-| **链上链下** | http://localhost:8083 | http://chain-sync:8083 | 8083 |
+| **Auth Service** | http://localhost:8088 | http://auth-service:8088 | 8088 |
+| **WS Gateway** | http://localhost:8087 | http://ws-gateway:8087 | 8087 |
 | **NFT 服务** | http://localhost:8084 | http://nft-service:8084 | 8084 |
 | **回购统计** | http://localhost:8085 | http://buyback-service:8085 | 8085 |
 | **风控服务** | http://localhost:8086 | http://risk-service:8086 | 8086 |
@@ -327,7 +335,7 @@ make docker-down
 | 阶段 | 模块名称 | 状态 | 说明 |
 |------|---------|------|------|
 | Phase 1 | 基础设施层 | ✅ 已完成 | Docker Compose、数据库、Makefile、中文注释 |
-| Phase 2 | 网关层 | ⏳ 待实现 | API Gateway、鉴权、限流 |
+| Phase 2 | 网关层 | ✅ 已完成 | API Gateway、鉴权中心、Sentinel 限流熔断、WebSocket Gateway、Nginx |
 | Phase 3 | 行情聚合 | ⏳ 待实现 | 多源行情、滤波、融合 |
 | Phase 4 | 撮合引擎 | ⏳ 待实现 | Disruptor、订单簿、撮合 |
 | Phase 5 | 链上链下 | ⏳ 待实现 | 双源校验、异步补偿 |
@@ -346,6 +354,11 @@ make docker-down
 | Prometheus | `curl http://localhost:9090/-/healthy` | 返回 200 |
 | Grafana | `curl http://localhost:3000/api/health` | 返回 200 |
 | Go 编译 | `make build` | 无报错 |
+| JWT 签发 | `curl -X POST http://localhost:8088/auth/login -d '{"username":"test"}'` | 返回 JWT Token |
+| JWT 验证 | `curl -H "Authorization: Bearer <token>" http://localhost:8088/auth/verify` | 返回用户信息 |
+| 限流测试 | `ab -n 100 -c 10 http://localhost:8080/api/v1/market/price` | 超限时返回 429 |
+| WebSocket | `wscat -c ws://localhost:8087/ws` | 连接成功，心跳正常 |
+| Nginx 代理 | `curl http://localhost/api/health` | 正确转发到 API Gateway |
 
 ## 常见问题
 

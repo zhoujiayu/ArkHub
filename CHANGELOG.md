@@ -84,11 +84,87 @@
 - 所有配置和代码均添加详细中文注释
 - Docker Compose 已成功启动（6/6 服务全部 healthy）
 
-### Phase 2：网关层（待实现 ⏳）
+### Phase 2：网关层（已完成 ✅）
 
-**计划变更文件：**
-- `cmd/api-gateway/` — API Gateway 完整实现
-- `internal/middleware/` — 限流、熔断中间件完整实现
+**变更文件：**
+
+#### 1. 统一响应格式
+- `internal/response/response.go` — 标准化 API 响应结构
+  - Response 结构体：Code / Message / Data / TraceID
+  - JSON() 返回成功响应，Error() 返回错误响应
+  - 预设状态码常量（成功、鉴权、限流、服务等）
+
+#### 2. JWT 工具包
+- `internal/pkg/jwt/jwt.go` — JWT 生成、解析、验签工具函数
+  - 使用 RS256 (RSA 非对称加密) 算法
+  - GenerateToken()：RSA 私钥签名生成 Token
+  - ParseToken()：RSA 公钥验签并解析 Claims
+  - 自动生成 RSA 密钥对 (configs/private.pem, configs/public.pem)
+
+#### 3. JWT 鉴权中间件
+- `internal/middleware/auth.go` — 完整 JWT 鉴权中间件
+  - AuthMiddleware()：从 Authorization Header 提取 Bearer Token
+  - 验证 Token 签名和过期时间
+  - 将 user_id 和 role 注入 gin.Context
+  - GenerateToken() / RefreshToken() 工具函数
+
+#### 4. 鉴权中心服务
+- `cmd/auth-service/main.go` — 独立鉴权服务
+  - POST `/auth/login` — 用户名密码登录，签发 JWT Token
+  - POST `/auth/refresh` — 刷新 Access Token
+  - GET `/auth/verify` — 验证 Token 有效性
+  - POST `/auth/logout` — 登出（简化版，未实现黑名单）
+  - 端口：8081
+
+#### 5. Sentinel 限流熔断中间件
+- `internal/middleware/ratelimit.go` — 完整限流熔断中间件
+  - InitSentinel()：初始化 Sentinel 规则
+  - RateLimitMiddleware()：三级限流（IP 60 req/min、用户 100 req/min、接口 1000 QPS）
+  - CircuitBreakerMiddleware()：熔断（错误率 > 50% 持续 30s）
+  - 降级恢复：返回 429 / 503 状态码
+
+#### 6. API Gateway 完整实现
+- `cmd/api-gateway/main.go` — 完整路由转发 + 中间件注册
+  - 集成 Prometheus 指标采集（http_requests_total、http_request_duration_seconds）
+  - 健康检查 /health 端点
+  - 路由转发到后端服务（market、order、nft、buyback、risk、chain）
+  - 使用 httputil.ReverseProxy 实现流式转发
+  - 支持优雅关闭（Graceful Shutdown）
+  - 端口：8080
+
+#### 7. WebSocket Gateway
+- `cmd/ws-gateway/main.go` — WebSocket 长连接服务
+  - 心跳机制：PING/PONG 每 30 秒，超时 90 秒断开
+  - 频道订阅：market.price、order.filled、nft.heat
+  - 消息广播：基于 Hub 模式的广播机制
+  - 支持 subscribe / unsubscribe / heartbeat 消息类型
+  - 端口：8087
+
+#### 8. Nginx 反向代理配置
+- `deployments/nginx.conf` — Nginx 反向代理配置
+  - `/api/` → API Gateway (localhost:8080)
+  - `/ws` → WebSocket Gateway (localhost:8087)
+  - 静态资源 /static/ → /var/www/static/
+  - 健康检查 /health → API Gateway
+
+#### 9. 集成测试
+- `test/integration/gateway_test.go` — 网关集成测试
+  - TestHealthEndpoint：验证健康检查端点
+  - TestAuthMiddlewareMissingToken：验证鉴权中间件拒绝未授权请求
+
+#### 10. 依赖更新
+- `go.mod` / `go.sum` — 新增依赖
+  - `github.com/golang-jwt/jwt/v5` — JWT 实现
+  - `github.com/alibaba/sentinel-golang` — 限流熔断
+  - `github.com/gorilla/websocket` — WebSocket 服务
+  - `github.com/stretchr/testify` — 测试断言
+
+**实现说明：**
+- JWT 采用 RS256 非对称加密，公钥用于验签，私钥用于签发
+- Sentinel 限流采用三级策略：IP 限流 + 用户限流 + 接口限流
+- API Gateway 使用 httputil.ReverseProxy 实现流式响应转发
+- WebSocket 采用 Hub 模式管理连接，支持多客户端广播
+- 所有代码均添加中文注释，说明职责和实现逻辑
 
 ### Phase 3：行情聚合（待实现 ⏳）
 
