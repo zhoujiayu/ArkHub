@@ -166,11 +166,86 @@
 - WebSocket 采用 Hub 模式管理连接，支持多客户端广播
 - 所有代码均添加中文注释，说明职责和实现逻辑
 
-### Phase 3：行情聚合（待实现 ⏳）
+### Phase 3：行情聚合（已完成 ✅）
 
-**计划变更文件：**
-- `cmd/market-data/` — 行情聚合服务
-- `internal/market/` — 多协议适配器、滤波算法
+**变更文件：**
+
+#### 1. 多协议行情适配器
+- `internal/market/adapter.go` — 多协议行情适配器
+  - `MarketDataSource` 接口：统一 REST / WebSocket / FIX / Internal 协议抽象
+  - `RESTSource`：HTTP 轮询适配器，支持超时控制（5s）
+  - `WebSocketSource`：WebSocket 长连接适配器，支持并发安全读写
+  - `FIXSource`：FIX 协议适配器（占位，用于传统金融机构对接）
+  - `InternalSource`：平台自有现货成交数据源，权重最高（0.4），并发安全
+  - `PriceTick`：统一行情数据结构（Source / Symbol / Price / Timestamp）
+
+#### 2. 滤波算法与异常剔除
+- `internal/market/filter.go` — 中位数滤波 + 异常剔除算法
+  - `MedianFilter(prices)`：排序后取中位数，对极端值不敏感，O(n log n)
+  - `RemoveOutliers(prices, threshold)`：Z-Score 异常剔除，默认阈值 3σ
+  - `RemoveOutliersIQR(prices)`：IQR 四分位距法，对极端异常鲁棒
+  - `calcMeanStd()`：均值和标准差计算（内部辅助函数）
+  - `percentile()`：百分位数计算（内部辅助函数）
+
+#### 3. 加权融合引擎
+- `internal/market/fusion.go` — 加权融合引擎
+  - `SourcePrice`：带权重的价格源结构体
+  - `WeightedFusion(sources)`：按权重计算加权平均价格
+  - `WeightedFusionWithMedian(ticks, weights)`：先中位数滤波再按权重融合
+    - 偏离中位数 10% 以上的价格自动剔除
+    - 全部偏离时退化为中位数（兜底策略）
+
+#### 4. EIP-712 预言机签名
+- `internal/market/signer.go` — EIP-712 预言机签名模块
+  - `SignOraclePrice(symbol, price, timestamp, privateKey)`：生成 65 字节 EIP-712 签名
+  - `VerifyOraclePrice(symbol, price, timestamp, signature)`：验证签名并恢复公钥地址
+  - `OraclePriceData` / `OraclePriceTypedData`：EIP-712 结构化数据类型
+  - `HashEIP712Message(domainHash, typedDataHash)`：完整 EIP-712 签名消息哈希
+  - 价格精度 8 位小数，使用 `go-ethereum` 库实现 keccak256 哈希和 secp256k1 签名
+
+#### 5. 行情聚合服务主入口
+- `cmd/market-data/main.go` — 行情聚合服务主入口
+  - `aggregationEngine()`：定时聚合引擎（500ms 轮询）
+    - 收集多源价格 → 中位数滤波 → Z-Score 异常剔除 → 加权融合 → EIP-712 签名 → 多通道推送
+  - `collectPrices(sources)`：并发收集多源价格，使用 `sync.WaitGroup`
+  - `broadcastToWS(data)`：WebSocket 广播推送
+  - HTTP 端点：
+    - `GET /health` — 健康检查
+    - `GET /api/v1/index-price` — 获取当前指数价格
+    - `GET /api/v1/sources` — 获取数据源列表及状态
+    - `WS /ws` — WebSocket 实时订阅指数价格
+  - 端口：8082
+
+#### 6. 集成测试
+- `test/integration/market_test.go` — 行情聚合服务集成测试（15 个用例全部通过）
+  - 适配器测试：`TestInternalSource`、`TestRESTSource`、`TestWebSocketSource`
+  - 中位数滤波测试：`TestMedianFilter`（奇偶元素、含极端值、空切片）
+  - Z-Score 异常剔除测试：`TestRemoveOutliers`（正常、含异常值、阈值调整）
+  - IQR 异常剔除测试：`TestRemoveOutliersIQR`
+  - 加权融合测试：`TestWeightedFusion`、`TestWeightedFusionWithMedian`（含异常值场景）
+  - EIP-712 签名测试：`TestSignAndVerifyOraclePrice`、`TestSignOraclePrice_NilKey`、`TestVerifyOraclePrice_InvalidLength`
+  - 端到端聚合测试：`TestFullAggregationPipeline`（14 路数据 → 中位数滤波 → 加权融合）
+  - 并发安全测试：`TestInternalSource_Concurrent`（100 goroutine 并发读写）
+  - 性能基准测试：`BenchmarkMedianFilter`、`BenchmarkRemoveOutliers`、`BenchmarkWeightedFusion`
+
+#### 7. API 文档
+- `docs/market-api.md` — 行情聚合服务 API 文档
+  - 接口列表：健康检查、获取指数价格、获取数据源列表、WebSocket 实时订阅
+  - 核心算法说明：中位数滤波、Z-Score 异常剔除、加权融合、EIP-712 签名
+  - 错误码说明、部署命令、监控与告警、配置示例
+
+#### 8. 依赖更新
+- `go.mod` / `go.sum` — 新增依赖
+  - `github.com/ethereum/go-ethereum` — EIP-712 签名、keccak256 哈希
+  - `github.com/decred/dcrd/dcrec/secp256k1/v4` — secp256k1 椭圆曲线签名
+
+**实现说明：**
+- 多协议适配器采用接口抽象，新增数据源只需实现 `MarketDataSource` 接口
+- 中位数滤波 + Z-Score 双重保障：中位数提供基准，Z-Score 识别并剔除异常
+- 加权融合支持两种模式：纯权重融合 / 中位数滤波后融合（推荐，异常值自动剔除）
+- EIP-712 签名使用 `go-ethereum` 库，生产环境应从 KMS/HSM 读取私钥
+- 服务启动时生成测试私钥，实际生产环境需替换为安全密钥管理方案
+- 所有代码均添加中文注释，说明职责和实现逻辑
 
 ### Phase 4：撮合引擎（待实现 ⏳）
 

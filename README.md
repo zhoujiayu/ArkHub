@@ -282,13 +282,84 @@ ArkHub/
 
 每个部署和配置步骤记录到 `docs/setup/` 目录下的对应文档。
 
-### 5. 完成标记
+### 5. 完成标记与进度更新
 
-每个阶段完成后，在技术方案文档中标记完成状态（✅/❌）。
+每个阶段完成后，必须同时更新以下位置：
+
+- **README.md**：`阶段实现状态`表格中，将该阶段状态从 `⏳ 待实现` 改为 `✅ 已完成`
+- **技术方案文档**：`design/tech-specs/` 下对应文件，标记完成状态
+- **CHANGELOG.md**：按阶段记录完整变更明细（见第 6 条）
 
 ### 6. 文件变更记录
 
-每次修改后更新 `CHANGELOG.md`，记录变更文件列表。
+每次阶段完成后，必须在 `CHANGELOG.md` 中按以下格式记录变更文件明细：
+
+```markdown
+### Phase N：阶段名称（已完成 ✅）
+
+**变更文件：**
+
+#### 1. 子模块名称
+- `文件路径` — 文件用途说明
+  - 功能点 1：详细描述
+  - 功能点 2：详细描述
+
+#### 2. 子模块名称
+- `文件路径` — 文件用途说明
+  - ...
+
+**实现说明：**
+- 关键技术点说明
+- 依赖更新说明
+```
+
+变更文件记录必须包含：
+- 新增/修改/删除的文件路径
+- 每个文件的核心功能和设计决策
+- 关键代码结构说明
+- 依赖变化（新增、升级、删除）
+- 测试覆盖情况
+
+### 7. 数据流思维规则（核心）
+
+**规则**：代码中的每个处理步骤，输入必须来自上一步的输出，输出必须传递给下一步。禁止"计算了但丢弃"、"用了原始数据而非处理后的数据"等数据断流行为。
+
+**错误示例**：
+
+```go
+// ❌ 错误：步骤之间没有数据流动
+filtered := market.RemoveOutliers(prices)
+_ = market.MedianFilter(filtered)  // 结果丢弃，数据断流
+indexPrice, err := market.WeightedFusionWithMedian(ticks, weights)  // 用的还是原始数据
+```
+
+**正确示例**：
+
+```go
+// ✅ 正确：数据在步骤间流动
+filtered := market.RemoveOutliers(prices)
+median := market.MedianFilter(filtered)  // 保留结果
+validTicks := filterByMedian(ticks, median)  // 用上一步的结果
+indexPrice, err := market.WeightedFusion(validTicks, weights)  // 用过滤后的数据
+```
+
+**检查清单**：
+- [ ] 每个步骤的输出是否被下一步使用？
+- [ ] 是否有中间结果被丢弃（`_`）？
+- [ ] 最终使用的数据是否经过前置处理？
+- [ ] 测试是否验证了数据流（异常值是否被正确剔除）？
+
+### 8. 接口设计规则
+
+**函数命名必须准确反映行为**，避免误导。函数名应该让人一眼看出它做了什么，以及它的输入和输出。
+
+```go
+// ❌ 错误：名字有误导性，暗示内部会处理中位数
+func WeightedFusionWithMedian(ticks []*PriceTick, weights map[string]float64) (float64, error)
+
+// ✅ 正确：名字准确，调用者明确知道传入的数据必须先经过过滤
+func WeightedFusion(sources []SourcePrice) (float64, error)
+```
 
 ## 中间件访问信息速查
 
@@ -334,14 +405,14 @@ make docker-down
 
 | 阶段 | 模块名称 | 状态 | 说明 |
 |------|---------|------|------|
-| Phase 1 | 基础设施层 | ✅ 已完成 | Docker Compose、数据库、Makefile、中文注释 |
-| Phase 2 | 网关层 | ✅ 已完成 | API Gateway、鉴权中心、Sentinel 限流熔断、WebSocket Gateway、Nginx |
-| Phase 3 | 行情聚合 | ⏳ 待实现 | 多源行情、滤波、融合 |
-| Phase 4 | 撮合引擎 | ⏳ 待实现 | Disruptor、订单簿、撮合 |
-| Phase 5 | 链上链下 | ⏳ 待实现 | 双源校验、异步补偿 |
-| Phase 6 | NFT 业务 | ⏳ 待实现 | 元数据、稀有度、热度 |
-| Phase 7 | 回购统计 | ⏳ 待实现 | 预聚合、缓存、降级 |
-| Phase 8 | 风控服务 | ⏳ 待实现 | 实时风控、异常检测 |
+| Phase 1 | 基础设施层 | 已完成 | Docker Compose、数据库、Makefile、中文注释 |
+| Phase 2 | 网关层 | 已完成 | API Gateway、鉴权中心、Sentinel 限流熔断、WebSocket Gateway、Nginx |
+| Phase 3 | 行情聚合 | 已完成 | 多源行情接入、中位数滤波、Z-Score/IQR 异常剔除、加权融合、EIP-712 预言机签名 |
+| Phase 4 | 撮合引擎 | 待实现 | Disruptor、订单簿、撮合 |
+| Phase 5 | 链上链下 | 待实现 | 双源校验、异步补偿 |
+| Phase 6 | NFT 业务 | 待实现 | 元数据、稀有度、热度 |
+| Phase 7 | 回购统计 | 待实现 | 预聚合、缓存、降级 |
+| Phase 8 | 风控服务 | 待实现 | 实时风控、异常检测 |
 
 ## 验证清单
 
