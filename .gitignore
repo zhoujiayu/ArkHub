@@ -1,7 +1,7 @@
 # Binaries
-api-gateway
-auth-service
-ws-gateway
+/api-gateway
+/auth-service
+/ws-gateway
 *.exe
 *.dll
 *.so
