@@ -247,11 +247,95 @@
 - 服务启动时生成测试私钥，实际生产环境需替换为安全密钥管理方案
 - 所有代码均添加中文注释，说明职责和实现逻辑
 
-### Phase 4：撮合引擎（待实现 ⏳）
+### Phase 4：撮合引擎（已完成 ✅）
 
-**计划变更文件：**
-- `cmd/matching-engine/` — 撮合引擎服务
-- `internal/matching/` — Disruptor 队列、订单簿
+**变更文件：**
+
+#### 1. Disruptor 无锁队列
+- `internal/matching/disruptor.go` — 无锁环形队列（Disruptor 简化版）
+  - `RingBuffer` 结构体：预分配环形缓冲区，size 必须是 2 的幂次方
+  - `Put(order)`：CAS 无锁写入，队列满时返回 `ErrRingBufferFull`
+  - `Get()`：CAS 无锁读取，队列空时返回 `ErrRingBufferEmpty`
+  - `Len()` / `Cap()`：查询当前元素数量和总容量
+  - 缓存行对齐防止 false sharing，预分配内存避免 GC 压力
+  - 基准测试：`BenchmarkRingBuffer` — ~270 万 ops/s，0 内存分配
+
+#### 2. 内存订单簿
+- `internal/matching/orderbook.go` — 内存订单簿（价格优先 + 时间优先）
+  - `OrderBook` 结构体：使用 `map[float64][]*Order` 按价格分组存储
+  - `AddOrder(order)`：按方向添加到对应队列，同一价格按时间排序（FIFO）
+  - `RemoveOrder(id, side, price)`：从指定价格层级移除订单
+  - `GetBestBuy()` / `GetBestSell()`：获取最优买/卖价格
+  - `PeekBestBuy()` / `PeekBestSell()`：查看最优订单（不移除）
+  - `PopBestBuy()` / `PopBestSell()`：取出并移除最优订单
+  - `Snapshot()`：获取订单簿快照（深拷贝，线程安全）
+  - 基准测试：`BenchmarkOrderBookAdd` — ~94 ns/op
+
+#### 3. 撮合算法
+- `internal/matching/matcher.go` — 撮合引擎
+  - `Matcher` 结构体：撮合引擎核心，维护订单簿和成交记录通道
+  - `Match(order)`：对传入订单进行撮合，返回成交记录列表
+    - 买单：从卖单队列找最低价匹配（价格交叉条件：买价 >= 卖价）
+    - 卖单：从买单队列找最高价匹配（价格交叉条件：卖价 <= 买价）
+  - `matchBuy(order)` / `matchSell(order)`：撮合逻辑实现
+  - `execute(buy, sell)`：执行单次撮合，成交价格为被动单价格
+  - `CancelOrder(id, side, price)`：取消订单（从订单簿中移除）
+  - 支持完全成交、部分成交、多笔撮合、无法撮合（加入订单簿）
+  - 基准测试：`BenchmarkMatcher` — ~95 ns/op
+
+#### 4. 成交记录与异步持久化
+- `internal/matching/trade.go` — 成交记录生成与异步持久化
+  - `Trade` 结构体：记录完整成交信息（买卖订单、价格、数量、时间）
+  - `TradeStore` 接口：抽象存储层，支持内存和数据库实现
+  - `MemoryTradeStore`：内存存储实现，基于 `map[string]*Trade`
+    - `Save(trade)`：保存成交记录
+    - `GetByID(id)`：根据 ID 查询
+    - `GetByOrderID(id)`：根据订单 ID 查询
+    - `GetBySymbol(symbol, limit)`：查询指定交易对成交记录
+  - `AsyncTradeWriter`：异步批量写入器
+    - 批量写入（默认 100 条）+ 定时写入（默认 100ms）
+    - 支持优雅关闭：关闭时 flush 剩余数据
+
+#### 5. 自动熔断
+- `internal/matching/circuit.go` — 自动熔断器（三态模型）
+  - `State`：Closed（正常）/ Open（熔断）/ HalfOpen（半开）
+  - `NewCircuitBreaker(threshold, timeout, windowSize)`：创建熔断器
+  - `Call(fn)`：执行被熔断保护的函数
+    - Closed：正常执行，统计错误次数
+    - Open：拒绝所有请求，返回 `ErrCircuitOpen`
+    - HalfOpen：允许探测请求（默认 3 次），成功后恢复 Closed
+  - `Reset()`：手动重置熔断器状态
+  - 支持响应时间窗口统计（`GetAverageLatency()`）
+
+#### 6. 撮合引擎服务主入口
+- `cmd/matching-engine/main.go` — 撮合引擎服务主入口
+  - 初始化组件：订单簿、Disruptor 队列、熔断器、成交记录存储
+  - `consumeOrders()`：从 Disruptor 队列消费订单并进行撮合
+  - HTTP API：
+    - `POST /api/v1/order` — 提交订单
+    - `POST /api/v1/order/cancel` — 取消订单
+    - `GET /api/v1/orderbook` — 获取订单簿快照
+    - `GET /api/v1/trades` — 获取成交记录
+    - `GET /api/v1/circuit/status` — 获取熔断器状态
+    - `GET /health` — 健康检查
+  - 端口：8083
+
+#### 7. 集成测试
+- `test/integration/matching_test.go` — 撮合引擎集成测试（全部通过）
+  - Disruptor 测试：`TestDisruptorQueue`（基本读写、队列满、并发读写 1000 笔）
+  - 订单簿测试：`TestOrderBook`（添加/移除、价格排序、同一价格多订单）
+  - 撮合测试：`TestMatcher`（简单撮合、部分成交、无法撮合、多笔撮合、取消订单）
+  - 成交记录测试：`TestTradeStore`（保存/查询、多笔记录）
+  - 熔断测试：`TestCircuitBreaker`（熔断和恢复、重置）
+  - 性能基准：`BenchmarkRingBuffer`、`BenchmarkOrderBookAdd`、`BenchmarkMatcher`
+
+**实现说明：**
+- Disruptor 基于 CAS 原子操作，无锁设计，CPU 缓存友好
+- 内存订单簿使用 `map[float64][]*Order`，同一价格内按时间排序（FIFO）
+- 撮合算法支持完全成交、部分成交、多笔撮合
+- 成交记录异步持久化，批量写入减少 I/O 压力
+- 熔断器三态模型（Closed/Open/HalfOpen），支持自动恢复
+- 所有代码均添加中文注释，说明职责和实现逻辑
 
 ### Phase 5：链上链下（待实现 ⏳）
 
