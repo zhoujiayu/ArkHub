@@ -355,7 +355,7 @@ func handleLogout(c *gin.Context) {
 	// 计算 Token 剩余有效期
 	var ttl time.Duration
 	if claims.ExpiresAt != nil {
-		ttl = claims.ExpiresAt.Time.Sub(time.Now())
+		ttl = time.Until(claims.ExpiresAt.Time)
 		if ttl <= 0 {
 			ttl = time.Second
 		}
