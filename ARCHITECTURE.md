@@ -289,9 +289,9 @@ ws-gateway
 |------|------|------|
 | `/auth/register` | POST | 用户注册（bcrypt 加密密码，存入 PostgreSQL） |
 | `/auth/login` | POST | 用户登录（验证 bcrypt 密码，签发 JWT） |
-| `/auth/verify` | POST | 验证 Token（同时检查 Redis/PostgreSQL 黑名单） |
-| `/auth/refresh` | POST | 刷新 Token（旧 Token 未注销才允许刷新） |
-| `/auth/logout` | POST | 注销（Token 加入 Redis+PostgreSQL 双写黑名单） |
+| `/auth/verify` | GET | 验证 Token（Header: `Authorization: Bearer <token>`） |
+| `/auth/refresh` | POST | 刷新 Token（Body 传旧 Token） |
+| `/auth/logout` | POST | 注销（Header: `Authorization: Bearer <token>`，Token 加入黑名单） |
 
 **Token 黑名单机制**：
 

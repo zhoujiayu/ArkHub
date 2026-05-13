@@ -173,11 +173,11 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: matching-engine
-        SERVICE_PORT: 8081
+        SERVICE_PORT: 8083
     image: arhub/matching-engine:latest
     container_name: arhub-matching-engine
     ports:
-      - "8081:8081"
+      - "8083:8083"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -237,11 +237,11 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: chain-sync
-        SERVICE_PORT: 8083
+        SERVICE_PORT: 8084
     image: arhub/chain-sync:latest
     container_name: arhub-chain-sync
     ports:
-      - "8083:8083"
+      - "8084:8084"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -269,11 +269,11 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: nft-service
-        SERVICE_PORT: 8084
+        SERVICE_PORT: 8085
     image: arhub/nft-service:latest
     container_name: arhub-nft-service
     ports:
-      - "8084:8084"
+      - "8085:8085"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -301,11 +301,11 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: buyback-service
-        SERVICE_PORT: 8085
+        SERVICE_PORT: 8086
     image: arhub/buyback-service:latest
     container_name: arhub-buyback-service
     ports:
-      - "8085:8085"
+      - "8086:8086"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -333,11 +333,11 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: risk-service
-        SERVICE_PORT: 8086
+        SERVICE_PORT: 8089
     image: arhub/risk-service:latest
     container_name: arhub-risk-service
     ports:
-      - "8086:8086"
+      - "8089:8089"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -370,6 +370,8 @@ services:
     container_name: arhub-auth-service
     ports:
       - "8088:8088"
+    volumes:
+      - ../configs:/app/configs:ro
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
