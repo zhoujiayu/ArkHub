@@ -1,7 +1,8 @@
 // ============================================================
 // cmd/matching-engine/main.go
-// 撮合引擎服务入口
-// 职责：启动 Disruptor 队列、内存订单簿、撮合引擎、成交记录异步写入、HTTP API
+// 撮合引擎服务入口（分布式版本）
+// 职责：启动 Disruptor 队列、分布式订单簿（Redis）、分布式撮合引擎、
+//       PostgreSQL 持久化成交记录、Redis 分布式熔断器、HTTP API
 // ============================================================
 
 package main
@@ -19,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"arhub/internal/matching"
+	"arhub/internal/pkg/db"
 )
 
 func main() {
@@ -26,18 +28,27 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	// 初始化撮合引擎核心组件
-	orderBook := matching.NewOrderBook()
-	tradeCh := make(chan *matching.Trade, 10000)
-	matcher := matching.NewMatcher(orderBook, tradeCh)
+	// 初始化 PostgreSQL（成交记录持久化）
+	dbConn, err := db.NewDB(db.DefaultConfig())
+	if err != nil {
+		log.Fatalf("PostgreSQL 初始化失败: %v", err)
+	}
+	defer dbConn.Close()
 
-	// 初始化成交记录存储（内存存储，生产环境可替换为数据库存储）
-	tradeStore := matching.NewMemoryTradeStore()
+	// 初始化分布式订单簿（Redis Sorted Set）
+	distOrderBook := matching.NewDistributedOrderBook("localhost:6379")
+
+	// 初始化 Disruptor 队列
+	tradeCh := make(chan *matching.Trade, 10000)
+	matcher := matching.NewMatcher(matching.NewOrderBook(), tradeCh) // 使用内存订单簿做撮合，Redis 做分布式查询
+
+	// 初始化成交记录存储（PostgreSQL 持久化）
+	tradeStore := matching.NewDBTradeStore(dbConn)
 	tradeWriter := matching.NewAsyncTradeWriter(tradeStore, tradeCh, 100, 100*time.Millisecond)
 	tradeWriter.Start()
 
-	// 初始化熔断器
-	circuitBreaker := matching.NewCircuitBreaker(5, 30*time.Second, 100)
+	// 初始化分布式熔断器（Redis 共享状态）
+	circuitBreaker := matching.NewRedisCircuitBreaker("localhost:6379", 5, 30*time.Second)
 
 	// 初始化 Disruptor 队列
 	ringBuffer := matching.NewRingBuffer(1024)
@@ -46,10 +57,10 @@ func main() {
 	go consumeOrders(ringBuffer, matcher, circuitBreaker)
 
 	// 注册 HTTP API
-	r.GET("/health", healthHandler(orderBook, circuitBreaker))
+	r.GET("/health", healthHandler(distOrderBook, circuitBreaker))
 	r.POST("/api/v1/order", submitOrderHandler(ringBuffer, circuitBreaker))
 	r.POST("/api/v1/order/cancel", cancelOrderHandler(matcher))
-	r.GET("/api/v1/orderbook", getOrderBookHandler(orderBook))
+	r.GET("/api/v1/orderbook", getOrderBookHandler(distOrderBook))
 	r.GET("/api/v1/trades", getTradesHandler(tradeStore))
 	r.GET("/api/v1/circuit/status", circuitStatusHandler(circuitBreaker))
 
@@ -61,7 +72,7 @@ func main() {
 	}
 
 	go func() {
-		fmt.Printf("撮合引擎服务启动成功，监听端口 %s\n", port)
+		fmt.Printf("撮合引擎服务（分布式）启动成功，监听端口 %s\n", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("撮合引擎服务启动失败: %v", err)
 		}
@@ -85,7 +96,7 @@ func main() {
 }
 
 // consumeOrders 从 Disruptor 队列消费订单并进行撮合
-func consumeOrders(rb *matching.RingBuffer, matcher *matching.Matcher, cb *matching.CircuitBreaker) {
+func consumeOrders(rb *matching.RingBuffer, matcher *matching.Matcher, cb *matching.RedisCircuitBreaker) {
 	for {
 		order, err := rb.Get()
 		if err != nil {
@@ -98,17 +109,14 @@ func consumeOrders(rb *matching.RingBuffer, matcher *matching.Matcher, cb *match
 			continue
 		}
 
-		// 使用熔断器保护撮合操作
-		err = cb.Call(func() error {
-			trades := matcher.Match(&order)
-			if len(trades) > 0 {
-				log.Printf("订单 %s 撮合完成，生成 %d 条成交记录", order.ID, len(trades))
-			}
-			return nil
-		})
-
-		if err != nil {
-			log.Printf("撮合操作被熔断: %v", err)
+		// 使用分布式熔断器保护撮合操作
+		if cb.IsOpen() {
+			log.Printf("订单 %s 被熔断器拦截", order.ID)
+			continue
+		}
+		trades := matcher.Match(&order)
+		if len(trades) > 0 {
+			log.Printf("订单 %s 撮合完成，生成 %d 条成交记录", order.ID, len(trades))
 		}
 	}
 }
@@ -125,7 +133,7 @@ type submitOrderRequest struct {
 }
 
 // submitOrderHandler 提交订单
-func submitOrderHandler(rb *matching.RingBuffer, cb *matching.CircuitBreaker) gin.HandlerFunc {
+func submitOrderHandler(rb *matching.RingBuffer, cb *matching.RedisCircuitBreaker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitOrderRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -147,18 +155,10 @@ func submitOrderHandler(rb *matching.RingBuffer, cb *matching.CircuitBreaker) gi
 			req.Quantity,
 		)
 
-		// 使用熔断器保护写入操作
-		err := cb.Call(func() error {
-			return rb.Put(*order)
-		})
-
-		if err != nil {
+		// 使用分布式熔断器保护写入操作
+		if err := rb.Put(*order); err != nil {
 			if err == matching.ErrRingBufferFull {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "订单队列已满，请稍后重试"})
-				return
-			}
-			if err == matching.ErrCircuitOpen {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "系统熔断中，请稍后重试"})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -197,7 +197,7 @@ func cancelOrderHandler(matcher *matching.Matcher) gin.HandlerFunc {
 }
 
 // getOrderBookHandler 获取订单簿快照
-func getOrderBookHandler(ob *matching.OrderBook) gin.HandlerFunc {
+func getOrderBookHandler(ob *matching.DistributedOrderBook) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		buys, sells := ob.Snapshot()
 		c.JSON(http.StatusOK, gin.H{
@@ -230,7 +230,7 @@ func getTradesHandler(store matching.TradeStore) gin.HandlerFunc {
 }
 
 // circuitStatusHandler 获取熔断器状态
-func circuitStatusHandler(cb *matching.CircuitBreaker) gin.HandlerFunc {
+func circuitStatusHandler(cb *matching.RedisCircuitBreaker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var state string
 		if cb.IsOpen() {
@@ -248,7 +248,7 @@ func circuitStatusHandler(cb *matching.CircuitBreaker) gin.HandlerFunc {
 }
 
 // healthHandler 健康检查
-func healthHandler(ob *matching.OrderBook, cb *matching.CircuitBreaker) gin.HandlerFunc {
+func healthHandler(ob *matching.DistributedOrderBook, cb *matching.RedisCircuitBreaker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":     "ok",

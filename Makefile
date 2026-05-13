@@ -6,7 +6,7 @@
 #   2. Docker 部署：docker-compose up --build（推荐）
 # ============================================================
 
-.PHONY: build test clean setup start stop status setup-db docker-build docker-up docker-down docker-logs help infra-up infra-down infra-status run-api run-auth run-ws run-all stop-go docker-go-up docker-go-down
+.PHONY: build test clean setup start stop status setup-db docker-build docker-up docker-down docker-logs docker-logs-api docker-logs-matching docker-logs-market docker-logs-chain docker-logs-nft docker-logs-buyback docker-logs-auth docker-logs-ws help infra-up infra-down infra-status run-api run-auth run-ws run-matching run-market run-chain run-nft run-buyback run-all stop-go docker-go-up docker-go-down
 
 # 默认目标
 .DEFAULT_GOAL := help
@@ -29,7 +29,11 @@ help:
 	@echo "  make infra-status   - 查看中间件运行状态"
 	@echo ""
 	@echo "【Go 服务本地运行（开发模式）】"
-	@echo "  make run-api        - 运行 API Gateway（端口 8080）"
+	@echo "  make run-chain      - 运行链上链下一致性服务（端口 8084）"
+	@echo "  make run-nft        - 运行 NFT 业务服务（端口 8085）"
+	@echo "  make run-buyback    - 运行回购统计服务（端口 8086）"
+	@echo "  make run-matching   - 运行撮合引擎服务（端口 8083）"
+	@echo "  make run-market     - 运行行情聚合服务（端口 8082）"
 	@echo "  make run-auth       - 运行鉴权中心（端口 8088）"
 	@echo "  make run-ws         - 运行 WebSocket Gateway（端口 8087）"
 	@echo "  make run-all        - 一键后台运行所有本地 Go 服务"
@@ -107,6 +111,31 @@ run-ws:
 	@echo "🚀 启动 WebSocket Gateway..."
 	go run cmd/ws-gateway/main.go
 
+# 运行撮合引擎服务
+run-matching:
+	@echo "🚀 启动撮合引擎服务..."
+	go run cmd/matching-engine/main.go
+
+# 运行行情聚合服务
+run-market:
+	@echo "🚀 启动行情聚合服务..."
+	go run cmd/market-data/main.go
+
+# 运行链上链下一致性服务
+run-chain:
+	@echo "🚀 启动链上链下一致性服务..."
+	go run cmd/chain-sync/main.go
+
+# 运行 NFT 业务服务
+run-nft:
+	@echo "🚀 启动 NFT 业务服务..."
+	go run cmd/nft-service/main.go
+
+# 运行回购统计服务
+run-buyback:
+	@echo "🚀 启动回购统计服务..."
+	go run cmd/buyback-service/main.go
+
 # 一键后台运行所有本地 Go 服务（开发调试用）
 run-all: build
 	@echo "🚀 后台启动所有本地 Go 服务..."
@@ -114,17 +143,32 @@ run-all: build
 	@nohup ./bin/api-gateway > logs/api-gateway.log 2>&1 &
 	@nohup ./bin/auth-service > logs/auth-service.log 2>&1 &
 	@nohup ./bin/ws-gateway > logs/ws-gateway.log 2>&1 &
+	@nohup ./bin/matching-engine > logs/matching-engine.log 2>&1 &
+	@nohup ./bin/market-data > logs/market-data.log 2>&1 &
+	@nohup ./bin/chain-sync > logs/chain-sync.log 2>&1 &
+	@nohup ./bin/nft-service > logs/nft-service.log 2>&1 &
+	@nohup ./bin/buyback-service > logs/buyback-service.log 2>&1 &
 	@echo "✅ 所有本地服务已后台启动"
 	@echo ""
 	@echo "服务访问地址："
 	@echo "  API Gateway:    http://localhost:8080"
 	@echo "  Auth Service:   http://localhost:8088"
 	@echo "  WS Gateway:     ws://localhost:8087/ws"
+	@echo "  Matching:       http://localhost:8083"
+	@echo "  Market Data:    http://localhost:8082"
+	@echo "  Chain Sync:     http://localhost:8084"
+	@echo "  NFT Service:    http://localhost:8085"
+	@echo "  Buyback:        http://localhost:8086"
 	@echo ""
 	@echo "日志查看："
 	@echo "  tail -f logs/api-gateway.log"
 	@echo "  tail -f logs/auth-service.log"
 	@echo "  tail -f logs/ws-gateway.log"
+	@echo "  tail -f logs/matching-engine.log"
+	@echo "  tail -f logs/market-data.log"
+	@echo "  tail -f logs/chain-sync.log"
+	@echo "  tail -f logs/nft-service.log"
+	@echo "  tail -f logs/buyback-service.log"
 
 # 一键停止所有本地 Go 服务
 stop-go:
@@ -132,9 +176,19 @@ stop-go:
 	@pkill -f "bin/api-gateway" || true
 	@pkill -f "bin/auth-service" || true
 	@pkill -f "bin/ws-gateway" || true
+	@pkill -f "bin/matching-engine" || true
+	@pkill -f "bin/market-data" || true
+	@pkill -f "bin/chain-sync" || true
+	@pkill -f "bin/nft-service" || true
+	@pkill -f "bin/buyback-service" || true
 	@pkill -f "cmd/api-gateway/main.go" || true
 	@pkill -f "cmd/auth-service/main.go" || true
 	@pkill -f "cmd/ws-gateway/main.go" || true
+	@pkill -f "cmd/matching-engine/main.go" || true
+	@pkill -f "cmd/market-data/main.go" || true
+	@pkill -f "cmd/chain-sync/main.go" || true
+	@pkill -f "cmd/nft-service/main.go" || true
+	@pkill -f "cmd/buyback-service/main.go" || true
 	@echo "✅ 所有本地 Go 服务已停止"
 
 # ============================================================
@@ -216,12 +270,12 @@ docker-up:
 	@echo "  API Gateway:    http://localhost:8080"
 	@echo "  Auth Service:   http://localhost:8088"
 	@echo "  WS Gateway:     ws://localhost:8087/ws"
-	@echo "  Matching:       http://localhost:8081"
+	@echo "  Matching:       http://localhost:8083"
 	@echo "  Market Data:    http://localhost:8082"
-	@echo "  Chain Sync:     http://localhost:8083"
-	@echo "  NFT Service:    http://localhost:8084"
-	@echo "  Buyback:        http://localhost:8085"
-	@echo "  Risk:           http://localhost:8086"
+	@echo "  Chain Sync:     http://localhost:8084"
+	@echo "  NFT Service:    http://localhost:8085"
+	@echo "  Buyback:        http://localhost:8086"
+	@echo "  Risk:           http://localhost:8089"
 
 # 停止并删除所有容器
 docker-down:
@@ -239,12 +293,12 @@ docker-go-up:
 	@echo "  API Gateway:    http://localhost:8080"
 	@echo "  Auth Service:   http://localhost:8088"
 	@echo "  WS Gateway:     ws://localhost:8087/ws"
-	@echo "  Matching:       http://localhost:8081"
+	@echo "  Matching:       http://localhost:8083"
 	@echo "  Market Data:    http://localhost:8082"
-	@echo "  Chain Sync:     http://localhost:8083"
-	@echo "  NFT Service:    http://localhost:8084"
-	@echo "  Buyback:        http://localhost:8085"
-	@echo "  Risk:           http://localhost:8086"
+	@echo "  Chain Sync:     http://localhost:8084"
+	@echo "  NFT Service:    http://localhost:8085"
+	@echo "  Buyback:        http://localhost:8086"
+	@echo "  Risk:           http://localhost:8089"
 
 # 一键停止 Docker 中的 Go 服务（不停止中间件）
 docker-go-down:
@@ -264,3 +318,13 @@ docker-logs-matching:
 	$(DOCKER_COMPOSE) logs -f matching-engine
 docker-logs-market:
 	$(DOCKER_COMPOSE) logs -f market-data
+docker-logs-chain:
+	$(DOCKER_COMPOSE) logs -f chain-sync
+docker-logs-nft:
+	$(DOCKER_COMPOSE) logs -f nft-service
+docker-logs-buyback:
+	$(DOCKER_COMPOSE) logs -f buyback-service
+docker-logs-auth:
+	$(DOCKER_COMPOSE) logs -f auth-service
+docker-logs-ws:
+	$(DOCKER_COMPOSE) logs -f ws-gateway

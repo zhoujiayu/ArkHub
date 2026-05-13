@@ -55,11 +55,11 @@ func init() {
 // 后端服务地址映射表
 var serviceMap = map[string]string{
 	"market":  "http://localhost:8082",
-	"order":   "http://localhost:8081",
-	"nft":     "http://localhost:8084",
-	"buyback": "http://localhost:8085",
-	"risk":    "http://localhost:8086",
-	"chain":   "http://localhost:8083",
+	"order":   "http://localhost:8083",
+	"nft":     "http://localhost:8085",
+	"buyback": "http://localhost:8086",
+	"risk":    "http://localhost:8089",
+	"chain":   "http://localhost:8084",
 }
 
 func main() {

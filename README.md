@@ -216,6 +216,10 @@ ArkHub/
 │   ├── buyback-service/          # Phase 7：回购统计服务
 │   └── risk-service/             # Phase 8：风控服务
 ├── internal/                     # 私有代码（不对外暴露）
+│   ├── matching/                 # Phase 4：撮合引擎（订单簿、撮合算法、成交记录、熔断器）
+│   ├── chain/                    # Phase 5：链上链下（区块链 SDK、双源校验、异步补偿、事件同步）
+│   ├── nft/                      # Phase 6：NFT 业务（IPFS、稀有度、热度、欺诈检测）
+│   ├── buyback/                  # Phase 7：回购统计（聚合、缓存、降级策略）
 │   ├── pkg/                      # 公共包（数据库、Redis、MQ 客户端封装、JWT）
 │   │   ├── db/                   # PostgreSQL 客户端封装
 │   │   ├── redis/                # Redis 缓存客户端封装
@@ -256,6 +260,13 @@ ArkHub/
 | `make test` | 运行所有测试 | `make test` |
 | `make setup-db` | 初始化数据库 | `make setup-db` |
 | `make clean` | 清理容器和构建产物 | `make clean` |
+| `make run-matching` | 运行撮合引擎服务（端口 8083） | `make run-matching` |
+| `make run-market` | 运行行情聚合服务（端口 8082） | `make run-market` |
+| `make run-chain` | 运行链上链下服务（端口 8084） | `make run-chain` |
+| `make run-nft` | 运行 NFT 业务服务（端口 8085） | `make run-nft` |
+| `make run-buyback` | 运行回购统计服务（端口 8086） | `make run-buyback` |
+| `make run-auth` | 运行鉴权中心（端口 8088） | `make run-auth` |
+| `make run-ws` | 运行 WebSocket Gateway（端口 8087） | `make run-ws` |
 
 ## 开发实施规则
 
@@ -377,13 +388,14 @@ func WeightedFusion(sources []SourcePrice) (float64, error)
 | 服务 | 本地地址 | 容器内地址 | 端口 |
 |------|---------|-----------|------|
 | **API Gateway** | http://localhost:8080 | http://api-gateway:8080 | 8080 |
-| **撮合引擎** | http://localhost:8081 | http://matching-engine:8081 | 8081 |
+| **撮合引擎** | http://localhost:8083 | http://matching-engine:8083 | 8083 |
 | **行情聚合** | http://localhost:8082 | http://market-data:8082 | 8082 |
+| **链上链下** | http://localhost:8084 | http://chain-sync:8084 | 8084 |
+| **NFT 服务** | http://localhost:8085 | http://nft-service:8085 | 8085 |
+| **回购统计** | http://localhost:8086 | http://buyback-service:8086 | 8086 |
 | **Auth Service** | http://localhost:8088 | http://auth-service:8088 | 8088 |
 | **WS Gateway** | http://localhost:8087 | http://ws-gateway:8087 | 8087 |
-| **NFT 服务** | http://localhost:8084 | http://nft-service:8084 | 8084 |
-| **回购统计** | http://localhost:8085 | http://buyback-service:8085 | 8085 |
-| **风控服务** | http://localhost:8086 | http://risk-service:8086 | 8086 |
+| **风控服务** | http://localhost:8089 | http://risk-service:8089 | 8089 |
 
 ### Docker 部署命令
 
@@ -408,11 +420,144 @@ make docker-down
 | Phase 1 | 基础设施层 | 已完成 | Docker Compose、数据库、Makefile、中文注释 |
 | Phase 2 | 网关层 | 已完成 | API Gateway、鉴权中心、Sentinel 限流熔断、WebSocket Gateway、Nginx |
 | Phase 3 | 行情聚合 | 已完成 | 多源行情接入、中位数滤波、Z-Score/IQR 异常剔除、加权融合、EIP-712 预言机签名 |
-| Phase 4 | 撮合引擎 | 待实现 | Disruptor、订单簿、撮合 |
-| Phase 5 | 链上链下 | 待实现 | 双源校验、异步补偿 |
-| Phase 6 | NFT 业务 | 待实现 | 元数据、稀有度、热度 |
-| Phase 7 | 回购统计 | 待实现 | 预聚合、缓存、降级 |
+| Phase 4 | 撮合引擎 | 已完成 | Disruptor 无锁队列、内存订单簿、分布式 Redis 订单簿、PostgreSQL 持久化、Redis 熔断器 |
+| Phase 5 | 链上链下 | 已完成 | 统一区块链 SDK、双源校验、异步补偿、事件同步、数据校准 |
+| Phase 6 | NFT 业务 | 已完成 | IPFS 元数据、稀有度量化、热度评分、异常交易检测 |
+| Phase 7 | 回购统计 | 已完成 | 定时聚合、Redis 缓存、降级策略、统计 API |
 | Phase 8 | 风控服务 | 待实现 | 实时风控、异常检测 |
+
+## 系统模块详细说明
+
+### Phase 4：分布式订单撮合引擎（端口 8083）
+
+**技术栈**：Disruptor 无锁环形队列 + 内存订单簿 + Redis Sorted Set 分布式订单簿 + PostgreSQL 持久化 + Redis 分布式熔断器
+
+**核心组件**：
+
+| 文件路径 | 职责 |
+|---------|------|
+| `internal/matching/disruptor.go` | Disruptor 无锁环形队列（CAS 原子操作，避免锁竞争） |
+| `internal/matching/orderbook.go` | 内存订单簿（价格优先 + 时间优先，map[float64][]*Order） |
+| `internal/matching/matcher.go` | 撮合引擎（买单匹配最低卖价，卖单匹配最高买价） |
+| `internal/matching/distributed.go` | 分布式改造：Redis Sorted Set 订单簿、PostgreSQL 成交记录、Redis 熔断器 |
+| `internal/matching/circuit.go` | 自动熔断机制（Closed / Open / HalfOpen 三态） |
+| `internal/matching/trade.go` | 成交记录模型与异步写入 |
+| `cmd/matching-engine/main.go` | 服务入口，HTTP API |
+
+**关键设计**：
+- **无锁队列**：基于 CAS 的原子操作实现生产者-消费者模型，size 必须是 2 的幂次方，通过 `index & mask` 快速取模
+- **内存撮合**：Matcher 使用内存订单簿做实时撮合，保证低延迟
+- **分布式查询**：DistributedOrderBook 基于 Redis Sorted Set（买单 score=-price，卖单 score=price）实现跨进程共享
+- **持久化**：成交记录通过 `AsyncTradeWriter` 批量写入 PostgreSQL
+- **熔断保护**：RedisCircuitBreaker 基于 Redis 共享失败计数，达到阈值后自动熔断
+
+**HTTP API**：
+- `POST /api/v1/order` — 提交订单
+- `POST /api/v1/order/cancel` — 取消订单
+- `GET /api/v1/orderbook` — 获取订单簿快照（分布式查询）
+- `GET /api/v1/trades` — 查询成交记录
+- `GET /api/v1/circuit/status` — 熔断器状态
+- `GET /health` — 健康检查
+
+---
+
+### Phase 5：链上链下一致性服务（端口 8084）
+
+**技术栈**：统一区块链 SDK + 双源校验 + 异步补偿 + 事件同步 + 数据校准
+
+**核心组件**：
+
+| 文件路径 | 职责 |
+|---------|------|
+| `internal/chain/client.go` | 统一区块链 SDK（Ethereum / Polygon / Arbitrum） |
+| `internal/chain/validator.go` | 双源校验器（链上 RPC + 链下数据库交叉验证） |
+| `internal/chain/compensation.go` | 异步补偿（失败重试 + 幂等性保证） |
+| `internal/chain/sync.go` | 事件同步引擎（监听链上事件，同步到本地数据库） |
+| `internal/chain/reconciler.go` | 数据校准器（定期全量对账，发现不一致时自动补偿） |
+| `cmd/chain-sync/main.go` | 服务入口，HTTP API |
+
+**关键设计**：
+- **统一 SDK**：`ChainClient` 接口封装多链 RPC 调用，`ChainClientFactory` 根据链名创建对应客户端
+- **双源校验**：链上状态与链下数据库同时查询，结果不一致时触发告警
+- **异步补偿**：消息队列驱动，失败自动重试，支持幂等性去重
+- **事件同步**：WebSocket 订阅链上事件，实时同步到 PostgreSQL
+- **数据校准**：定时任务对比链上最新区块与本地记录，发现重组时自动回滚
+
+**HTTP API**：
+- `POST /api/v1/validate` — 执行双源校验（请求体：`{"address":"0x...","amount":"100"}`）
+- `POST /api/v1/compensate` — 手动触发异步补偿任务
+- `GET /api/v1/reconcile` — 执行数据校准，返回不一致报告
+- `GET /health` — 健康检查
+
+**后台任务**：
+- 定时补偿任务：每 5 分钟扫描不一致记录并自动补偿
+- 事件同步任务：启动链上事件监听器，实时同步到本地数据库
+
+---
+
+### Phase 6：NFT 业务服务（端口 8085）
+
+**技术栈**：IPFS 元数据 + 稀有度量化 + 热度评分 + 异常交易检测
+
+**核心组件**：
+
+| 文件路径 | 职责 |
+|---------|------|
+| `internal/nft/ipfs.go` | IPFS 网关 SDK（元数据获取） |
+| `internal/nft/parser.go` | 元数据解析器（JSON 标准化、字段校验） |
+| `internal/nft/rarity.go` | 稀有度量化（属性频率统计 + 全局排名） |
+| `internal/nft/heat.go` | 热度评分模型（交易量、价格趋势、社交指标） |
+| `internal/nft/fraud.go` | 异常交易检测（单地址占比、高频交易、转账闭环） |
+| `cmd/nft-service/main.go` | 服务入口，HTTP API |
+
+**关键设计**：
+- **IPFS 网关**：统一封装 HTTP 请求，支持超时控制和重试
+- **稀有度计算**：基于属性频率的逆序排名，分数越低越稀有
+- **热度评分**：加权融合交易量、价格变化率、社交媒体提及数
+- **欺诈检测**：三层检测（单地址占比 > 30%、高频交易 > 20次/小时、转账闭环深度 <= 3）
+
+**HTTP API**：
+- `GET /api/v1/nft/metadata?token_uri={uri}` — 通过 IPFS 网关拉取 NFT 元数据
+- `POST /api/v1/nft/rarity` — 计算稀有度评分（请求体：`{"token_id":"1","total_supply":10000}`）
+- `POST /api/v1/nft/heat` — 计算热度评分（请求体：`HeatMetrics`）
+- `POST /api/v1/nft/fraud-detect` — 执行欺诈检测（请求体：`Transaction[]`）
+- `GET /api/v1/nft/heat-updates` — 获取热度更新列表
+- `GET /health` — 健康检查
+
+**后台任务**：
+- 热度推送 goroutine：实时推送热度更新事件
+
+---
+
+### Phase 7：回购统计服务（端口 8086）
+
+**技术栈**：定时聚合 + Redis 缓存 + 降级策略
+
+**核心组件**：
+
+| 文件路径 | 职责 |
+|---------|------|
+| `internal/buyback/aggregator.go` | 定时聚合（按时间窗口汇总交易数据） |
+| `internal/buyback/cache.go` | 缓存层（Redis 主缓存 + 内存二级缓存） |
+| `internal/buyback/fallback.go` | 降级策略（缓存失败时自动降级到数据库） |
+| `internal/buyback/handler.go` | 统计 API（先查 Redis，失败降级到 DB） |
+| `cmd/buyback-service/main.go` | 服务入口，HTTP API |
+
+**关键设计**：
+- **定时聚合**：Cron 任务周期性汇总交易数据，结果写入 Redis
+- **多级缓存**：Redis 作为一级缓存，内存作为二级缓存，降低数据库压力
+- **自动降级**：缓存失效时自动查询数据库，保证服务可用性
+- **统计维度**：按 symbol、时间窗口、交易方向等多维度聚合
+
+**HTTP API**：
+- `GET /api/v1/buyback/stats` — 获取回购统计（先缓存后降级）
+- `POST /api/v1/buyback/refresh` — 手动刷新统计
+- `GET /health` — 健康检查
+
+**后台任务**：
+- 定时聚合任务：每 5 分钟执行一次回购数据聚合
+
+---
 
 ## 验证清单
 
@@ -430,6 +575,17 @@ make docker-down
 | 限流测试 | `ab -n 100 -c 10 http://localhost:8080/api/v1/market/price` | 超限时返回 429 |
 | WebSocket | `wscat -c ws://localhost:8087/ws` | 连接成功，心跳正常 |
 | Nginx 代理 | `curl http://localhost/api/health` | 正确转发到 API Gateway |
+| 撮合引擎健康检查 | `curl http://localhost:8083/health` | 返回 `ok` |
+| 撮合引擎提交订单 | `curl -X POST http://localhost:8083/api/v1/order -d '{"user_id":"U1","symbol":"BTC","side":"buy","price":50000,"quantity":1}'` | 返回订单 ID |
+| 撮合引擎查询订单簿 | `curl http://localhost:8083/api/v1/orderbook` | 返回买卖盘快照 |
+| 链上链下健康检查 | `curl http://localhost:8084/health` | 返回 `ok` |
+| 链上链下双源校验 | `curl -X POST http://localhost:8084/api/v1/validate -d '{"address":"0x...","amount":"100"}'` | 返回校验结果 |
+| 链上链下数据校准 | `curl http://localhost:8084/api/v1/reconcile` | 返回校准报告 |
+| NFT 服务健康检查 | `curl http://localhost:8085/health` | 返回 `ok` |
+| NFT 元数据查询 | `curl "http://localhost:8085/api/v1/nft/metadata?token_uri=ipfs://..."` | 返回元数据 |
+| NFT 热度评分 | `curl -X POST http://localhost:8085/api/v1/nft/heat -d '{"activity":100,"scarcity":0.8,"liquidity":50,"no_anomaly":1}'` | 返回热度分数 |
+| 回购统计健康检查 | `curl http://localhost:8086/health` | 返回 `ok` |
+| 回购统计查询 | `curl http://localhost:8086/api/v1/buyback/stats` | 返回统计数据 |
 
 ## 常见问题
 
