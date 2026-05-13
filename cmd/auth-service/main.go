@@ -348,7 +348,7 @@ func handleLogout(c *gin.Context) {
 
 	// 检查 Token 是否已在黑名单中
 	if isTokenBlacklisted(c.Request.Context(), tokenString) {
-		response.JSON(c, gin.H{"message": "注销成功（Token 已在黑名单中）"})
+		response.JSON(c, gin.H{"message": "注销成功(Token 已在黑名单中）"})
 		return
 	}
 
